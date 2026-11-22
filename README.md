@@ -2,6 +2,8 @@
 
 Search a text file with BM25, then measure when a postings index pays for itself. Each line is one document; the CLI prints the matching line number, relevance score, and text. No external libraries, server, or downloads at runtime.
 
+**Case study:** [When a full scan beats an index](docs/when-a-full-scan-beats-an-index.md) explains why a rare item lookup and a search for `stock` favored opposite retrieval paths.
+
 ```sh
 # Linux or WSL, with a C++17 compiler (c++, clang++, or zig c++).
 mkdir -p build
