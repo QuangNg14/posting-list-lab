@@ -38,3 +38,35 @@ Ubuntu 24.04 under WSL2, x86-64 Intel Core Ultra 7 165H; Zig 0.15.2 `c++ -std=c+
 | Unknown | 0.241 | 0.933 | 0.227 | 0.585 |
 
 Preparing the shared corpus took 13.060 ms. Building the additional index took 1.751 ms and reserved 1,573,912 bytes for 141,921 postings and their list directory. The rare-term query touches just one posting. The common query touches 12,000 and pays hash-accumulation overhead; here **the scan was faster**. Unknown-query times are close to timer overhead. These measurements do not establish real-corpus relevance, throughput under concurrency, or a universal speedup.
+
+## Relevance on BEIR SciFact
+
+The separate `retrieval/` benchmark uses all 5,183 documents and 300 judged queries in the [BEIR SciFact test split](https://github.com/beir-cellar/beir#beers-available-datasets). BM25 calls this repository's C++ postings index. Dense search uses exact cosine ranking with [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/1110a243fdf4706b3f48f1d95db1a4f5529b4d41), the AVX2 uint8 ONNX export, a 256-token limit, attention-mask mean pooling and L2 normalization. Both see title plus abstract. Hybrid uses reciprocal rank fusion of each system's top 100, with equal weights and `k=60`. No training or threshold tuning is needed to run it.
+
+```sh
+# Linux or WSL, x86-64/AVX2, Python 3.11+ and a C++17 compiler
+mkdir -p build/retrieval
+python3 -m venv build/retrieval/venv
+. build/retrieval/venv/bin/activate
+python -m pip install -r retrieval/requirements.txt
+python retrieval/prepare.py
+c++ -std=c++17 -O3 -DNDEBUG search.cpp retrieval/bm25.cpp -o build/retrieval/bm25
+python -m unittest discover -s retrieval
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false python retrieval/benchmark.py
+```
+
+For one local quality gate, run `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false python retrieval/gate.py` after setup. It rebuilds the C++ adapter, reissues all 300 queries to all three systems, writes fresh results, and exits nonzero if any of the nine [checked-in floors](retrieval/thresholds.json) is missed. The floors sit 0.006 to 0.015 below the measured baselines; they are drift tolerances, not generalization targets. The gate never uses an old report as evidence. Only document embeddings are cached across runs, keyed by the model, tokenizer, corpus, runtime and encoding code. `--thresholds FILE` substitutes a different set of floors; latency is reported but not gated on shared hardware.
+
+| System | Recall@10 | nDCG@10 | MRR | p50 ms | p95 ms |
+|---|---:|---:|---:|---:|---:|
+| C++ BM25 | 0.7843 | 0.6622 | 0.6348 | 5.64 | 12.49 |
+| MiniLM | 0.7806 | 0.6391 | 0.6037 | 17.83 | 39.63 |
+| RRF hybrid | 0.8089 | 0.6772 | 0.6462 | 23.71 | 47.62 |
+
+This run used Ubuntu under WSL2 on a shared Core Ultra 7 165H, Zig 0.15.2 `c++ -O3`, ONNX Runtime 1.23.2 CPU, one inference/BLAS thread and sequential queries. Each system received five warm-up queries, then one timed observation per judged query, rotating system order. Percentiles use nearest rank. These are warm single-query latencies, not an isolated throughput benchmark.
+
+Hybrid improved mean nDCG@10 by 0.0150 over BM25 but lost on **38 of 300** queries. On query 303, which names DMRT1 and MHM, BM25 ranked the first relevant document 2nd and dense ranked it 507th. The document got no dense vote in the top-100 fusion pool and fell to 14th. On query 660 it moved from 1st in BM25 to 8th in hybrid (dense: 620th). Exact-term evidence can be outweighed by agreement on other documents. The result is specific to these judgments, this encoder and this corpus.
+
+Recall@10 and nDCG@10 are macro averages over judged queries. MRR uses the first judged-relevant document in each system's **returned list**, not just its top ten; a miss scores zero. The lexical system returns positive-score matches, dense ranks the whole corpus, and hybrid can return at most 200 candidates. Unjudged documents count as nonrelevant. Ties use corpus row order. The per-query timer includes query processing, ranking, BM25 subprocess communication, and both retrieval calls plus fusion for hybrid. It excludes model loading, document encoding, index construction, warm-up, and metric calculation. Disk artifacts stay under ignored `build/retrieval/`.
+
+Data: [SciFact, Wadden et al.](https://aclanthology.org/2020.emnlp-main.609/), [CC BY-NC 2.0 per AllenAI](https://huggingface.co/datasets/allenai/scifact); [BEIR, Thakur et al.](https://arxiv.org/abs/2104.08663). The model is [Apache-2.0](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2). Neither weights nor dataset text are vendored.
